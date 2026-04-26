@@ -99,6 +99,25 @@ enum SMCDataCoder {
             .nilIfEmpty
     }
 
+    static func decodeTemperature(_ value: SMCValue) -> Double? {
+        switch value.dataType {
+        case "sp78":
+            guard value.bytes.count >= 2 else { return nil }
+            let raw = Int16(bitPattern: value.bytes.uint16(bigEndian: true))
+            return Double(raw) / 256.0
+        case "flt":
+            guard value.bytes.count >= 4 else { return nil }
+            let raw = value.bytes.uint32(bigEndian: false)
+            return Double(Float(bitPattern: raw))
+        case "fpe2":
+            guard value.bytes.count >= 2 else { return nil }
+            let raw = value.bytes.uint16(bigEndian: true)
+            return Double(raw) / 4.0
+        default:
+            return nil
+        }
+    }
+
     static func encodeRPM(_ rpm: Int, dataType: String) throws -> Data {
         switch dataType {
         case "fpe2":

@@ -6,6 +6,8 @@ struct OperationResultFormatter {
         lines.append("Service: \(status.serviceName)")
         lines.append("Fans: \(status.fans.count)")
         lines.append("Writable: \(status.isWritable ? "yes" : "no")")
+        lines.append(renderTemperatureLine(label: "CPU Temperature", value: status.cpuTemperatureCelsius))
+        lines.append(renderTemperatureLine(label: "GPU Temperature", value: status.gpuTemperatureCelsius))
 
         if !status.capability.notes.isEmpty {
             lines.append("Notes:")
@@ -25,5 +27,12 @@ struct OperationResultFormatter {
 
     func render(action: String, status: FanStatus) -> String {
         [action, render(status: status)].joined(separator: "\n")
+    }
+
+    private func renderTemperatureLine(label: String, value: Double?) -> String {
+        guard let value else {
+            return "\(label): unavailable"
+        }
+        return String(format: "%@: %.1f C", label, value)
     }
 }

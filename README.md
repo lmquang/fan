@@ -6,7 +6,7 @@ A native macOS CLI tool for Apple Silicon fan control using private IOKit/AppleS
 This tool utilizes private, undocumented macOS hardware interfaces. It is intended for power users and developers. Misuse may interfere with system-managed thermal regulation. Use at your own risk.
 
 ## Features
-- View current fan status (RPM, min, max, mode)
+- View current fan status (temperature, RPM, min, max, mode)
 - Enable automatic system fan control
 - Force maximum fan speed
 - Set manual fan speed as a percentage of maximum RPM
@@ -49,6 +49,7 @@ Running `sudo ./fan status` provides a breakdown of detected fans:
 Service: AppleSMC
 Fans: 2
 Writable: yes
+Temperature: 48.3 C
 Notes:
   - Ftst diagnostic unlock is available.
 [0] Fan 0: current=2641 RPM min=2317 RPM max=7000 RPM mode=auto target=2637 RPM

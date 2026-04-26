@@ -20,8 +20,19 @@ final class SMCFanController: HardwareAccessing {
             throw FanControlError.noFansDetected
         }
 
+        let temperatures = readTemperatures(using: connection)
+        let cpuTemperatureCelsius = representativeTemperature(from: temperatures, prefixes: ["TC", "Tp", "Te"])
+        let gpuTemperatureCelsius = representativeTemperature(from: temperatures, prefixes: ["TG", "Tg"])
         let capability = buildCapability(fans: fans, connection: connection)
-        return FanStatus(serviceName: connection.serviceName, fans: fans, capability: capability)
+        return FanStatus(
+            serviceName: connection.serviceName,
+            fans: fans,
+            temperatureCelsius: cpuTemperatureCelsius,
+            cpuTemperatureCelsius: cpuTemperatureCelsius,
+            gpuTemperatureCelsius: gpuTemperatureCelsius,
+            temperatures: temperatures,
+            capability: capability
+        )
     }
 
     func setAutomaticControl(for fans: [FanDescriptor]) throws {
@@ -30,19 +41,19 @@ final class SMCFanController: HardwareAccessing {
 
         if let forceValue = connection.readIfPresent(SMCKey.forceBits) {
             let bytes = try SMCDataCoder.encodeUInt(0, dataType: forceValue.dataType)
-            try connection.write(SMCKey.forceBits, dataType: forceValue.dataType, bytes: bytes)
+            try? connection.write(SMCKey.forceBits, dataType: forceValue.dataType, bytes: bytes)
         }
 
-        for fan in fans {
-            if let modeKey = resolvedModeKey(fanID: fan.id, connection: connection), let modeValue = connection.readIfPresent(modeKey) {
-                let bytes = try SMCDataCoder.encodeUInt(0, dataType: modeValue.dataType)
-                try connection.write(modeKey, dataType: modeValue.dataType, bytes: bytes)
-            }
+        try executeWithFtstUnlock(
+            connection: connection,
+            failureMessage: "automatic fan mode was rejected and Ftst unlock is not available"
+        ) {
+            try setAutomaticMode(for: fans, connection: connection)
         }
 
         if let forceTestValue = connection.readIfPresent(SMCKey.forceTest) {
             let bytes = try SMCDataCoder.encodeUInt(0, dataType: forceTestValue.dataType)
-            try connection.write(SMCKey.forceTest, dataType: forceTestValue.dataType, bytes: bytes)
+            try? connection.write(SMCKey.forceTest, dataType: forceTestValue.dataType, bytes: bytes)
         }
     }
 
@@ -156,6 +167,62 @@ final class SMCFanController: HardwareAccessing {
         )
     }
 
+    private func readTemperatures(using connection: SMCConnection) -> [TemperatureSensor] {
+        var sensorValues: [String: Double] = [:]
+
+        for key in SMCKey.temperatureCandidates {
+            if let value = connection.readIfPresent(key).flatMap(SMCDataCoder.decodeTemperature), isLikelyTemperature(value) {
+                sensorValues[key] = value
+            }
+        }
+
+        if let keyPattern = try? NSRegularExpression(pattern: #"^T[A-Za-z0-9]{3}$"#) {
+            for key in connection.enumerateKeys() {
+                let range = NSRange(location: 0, length: key.utf16.count)
+                guard keyPattern.firstMatch(in: key, options: [], range: range) != nil,
+                      !key.hasSuffix("c"),
+                      !key.hasSuffix("C") else {
+                    continue
+                }
+
+                if let value = connection.readIfPresent(key).flatMap(SMCDataCoder.decodeTemperature), isLikelyTemperature(value) {
+                    sensorValues[key] = value
+                }
+            }
+        }
+
+        let temperatures = sensorValues.keys.sorted().compactMap { key in
+            sensorValues[key].map { TemperatureSensor(key: key, celsius: $0) }
+        }
+
+        logger.debug("resolved readable temperature sensors count=\(temperatures.count, privacy: .public)")
+        return temperatures
+    }
+
+    private func representativeTemperature(from temperatures: [TemperatureSensor], prefixes: [String]) -> Double? {
+        let samples = temperatures
+            .filter { sensor in prefixes.contains(where: { sensor.key.hasPrefix($0) }) }
+            .map(\.celsius)
+
+        guard !samples.isEmpty else {
+            return nil
+        }
+        return medianValue(samples)
+    }
+
+    private func isLikelyTemperature(_ value: Double) -> Bool {
+        (10.0...120.0).contains(value)
+    }
+
+    private func medianValue(_ values: [Double]) -> Double {
+        let sorted = values.sorted()
+        let middle = sorted.count / 2
+        if sorted.count.isMultiple(of: 2) {
+            return (sorted[middle - 1] + sorted[middle]) / 2.0
+        }
+        return sorted[middle]
+    }
+
     private func resolvedModeKey(fanID: Int, connection: SMCConnection) -> String? {
         for key in SMCKey.modeCandidates(fanID) where connection.readIfPresent(key) != nil {
             return key
@@ -173,15 +240,28 @@ final class SMCFanController: HardwareAccessing {
     }
 
     private func prepareManualControl(targets: [FanTarget], connection: SMCConnection) throws {
-        do {
+        try executeWithFtstUnlock(
+            connection: connection,
+            failureMessage: "manual fan mode was rejected and Ftst unlock is not available"
+        ) {
             try setManualMode(for: targets, connection: connection)
+        }
+    }
+
+    private func executeWithFtstUnlock(
+        connection: SMCConnection,
+        failureMessage: String,
+        action: () throws -> Void
+    ) throws {
+        do {
+            try action()
             return
         } catch {
-            logger.debug("direct manual mode write failed; attempting Ftst unlock error=\(error.localizedDescription, privacy: .public)")
+            logger.debug("direct mode write failed; attempting Ftst unlock error=\(error.localizedDescription, privacy: .public)")
         }
 
         guard let forceTestValue = connection.readIfPresent(SMCKey.forceTest) else {
-            throw FanControlError.writeRejected("manual fan mode was rejected and Ftst unlock is not available")
+            throw FanControlError.writeRejected(failureMessage)
         }
 
         let unlockBytes = try SMCDataCoder.encodeUInt(1, dataType: forceTestValue.dataType)
@@ -190,15 +270,47 @@ final class SMCFanController: HardwareAccessing {
         let deadline = DispatchTime.now().uptimeNanoseconds + unlockTimeoutNanoseconds
         while DispatchTime.now().uptimeNanoseconds < deadline {
             do {
-                try setManualMode(for: targets, connection: connection)
+                try action()
                 return
             } catch {
-                logger.debug("manual mode retry still blocked error=\(error.localizedDescription, privacy: .public)")
+                logger.debug("mode write retry still blocked error=\(error.localizedDescription, privacy: .public)")
                 Thread.sleep(forTimeInterval: Double(unlockPollIntervalNanoseconds) / 1_000_000_000)
             }
         }
 
-        throw FanControlError.writeRejected("timed out waiting for Ftst unlock to allow manual fan mode")
+        throw FanControlError.writeRejected("timed out waiting for Ftst unlock to allow mode write")
+    }
+
+    private func setAutomaticMode(for fans: [FanDescriptor], connection: SMCConnection) throws {
+        for fan in fans {
+            var lastError: Error?
+            var wroteMode = false
+
+            for key in SMCKey.modeCandidates(fan.id) {
+                guard let modeValue = connection.readIfPresent(key) else {
+                    continue
+                }
+
+                do {
+                    let bytes = try SMCDataCoder.encodeUInt(0, dataType: modeValue.dataType)
+                    try connection.write(key, dataType: modeValue.dataType, bytes: bytes)
+                    wroteMode = true
+                    break
+                } catch {
+                    lastError = error
+                }
+            }
+
+            if wroteMode {
+                continue
+            }
+
+            if let lastError {
+                throw lastError
+            }
+
+            throw FanControlError.capabilityUnavailable("fan \(fan.id) does not expose a mode key")
+        }
     }
 
     private func setManualMode(for targets: [FanTarget], connection: SMCConnection) throws {

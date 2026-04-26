@@ -13,4 +13,7 @@ enum SMCKey {
     static func alternateMode(_ fanID: Int) -> String { "F\(fanID)md" }
     static func modeCandidates(_ fanID: Int) -> [String] { [mode(fanID), alternateMode(fanID)] }
     static func name(_ fanID: Int) -> String { "F\(fanID)ID" }
+    static let temperatureCandidates = [
+        "TC0P", "TC0E", "TC0F", "TC0D"
+    ]
 }

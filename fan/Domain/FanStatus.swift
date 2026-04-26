@@ -10,9 +10,18 @@ struct FanDescriptor {
     let mode: FanMode
 }
 
+struct TemperatureSensor {
+    let key: String
+    let celsius: Double
+}
+
 struct FanStatus {
     let serviceName: String
     let fans: [FanDescriptor]
+    let temperatureCelsius: Double?
+    let cpuTemperatureCelsius: Double?
+    let gpuTemperatureCelsius: Double?
+    let temperatures: [TemperatureSensor]
     let capability: FanCapability
 
     var isWritable: Bool {
